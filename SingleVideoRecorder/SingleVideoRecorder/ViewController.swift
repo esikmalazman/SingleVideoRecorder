@@ -19,7 +19,7 @@ class ViewController: UIViewController {
     var videoQueue = DispatchQueue(label: "videoQueue", qos: .userInitiated)
     
     var isVideoCapture = false
-    var metalVideoRecorder : MetalVideoRecorder {
+    var metalVideoRecorder : MetalVideoRecorder = {
         guard let filemanager = FileManager.default
             .urls(for: .documentDirectory, in: .userDomainMask).first else {
             fatalError("Could get urls")
@@ -31,7 +31,7 @@ class ViewController: UIViewController {
         }
         
         return MetalVideoRecorder(outputURL: videoOutputURL, size: CGSize(width: 1280, height: 720))!
-    }
+    }()
     
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
