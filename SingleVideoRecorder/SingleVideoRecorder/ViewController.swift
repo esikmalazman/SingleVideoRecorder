@@ -8,34 +8,81 @@
 import UIKit
 import AVFoundation
 
-class ViewController: UIViewController {
+final class ViewController: UIViewController {
     
     @IBOutlet weak var previewView: UIView!
     
     var session : AVCaptureSession!
-    var videoDeviceInput : AVCaptureInput!
     var videoOutput : AVCaptureVideoDataOutput!
     var previewLayer : AVCaptureVideoPreviewLayer!
     var videoQueue = DispatchQueue(label: "videoQueue", qos: .userInitiated)
     
-    var isVideoCapture = false
-    var metalVideoRecorder : MetalVideoRecorder = {
+    var isRecording = false
+    var startWritingVideo = false
+    
+    var assetWriter : AVAssetWriter!
+    var assetWriterInput : AVAssetWriterInput!
+    
+    
+    func setupAssetWriter() {
         guard let filemanager = FileManager.default
             .urls(for: .documentDirectory, in: .userDomainMask).first else {
             fatalError("Could get urls")
         }
+        
         let videoOutputURL = filemanager.appendingPathComponent("MyVideo.mov")
         
         if FileManager.default.fileExists(atPath: videoOutputURL.path) {
             try? FileManager.default.removeItem(atPath: videoOutputURL.path)
         }
         
-        return MetalVideoRecorder(outputURL: videoOutputURL, size: CGSize(width: 1280, height: 720))!
-    }()
+        assetWriter = try! AVAssetWriter(outputURL: videoOutputURL, fileType: .mp4)
+    }
+    
+    func setupAssetWriterInput() {
+        let outputSettings : [String:Any]  = [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey : 1280,
+            AVVideoHeightKey : 720
+        ]
+        
+        assetWriterInput = AVAssetWriterInput(mediaType: .video, outputSettings: outputSettings)
+        assetWriterInput.expectsMediaDataInRealTime = true
+        
+        guard assetWriter.canAdd(assetWriterInput) else {
+            fatalError("Could not add input into assetWriter")
+        }
+        
+        assetWriter.add(assetWriterInput)
+    }
+    
+    func beginRecording(_ sampleBuffer : CMSampleBuffer) {
+        let time = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        assetWriter.startSession(atSourceTime: time)
+        
+        assetWriterInput.append(sampleBuffer)
+    }
+    
+    func finishRecording() {
+        assetWriterInput.markAsFinished()
+        assetWriter.finishWriting {
+            let videoURL = self.assetWriter.outputURL
+            self.presentVideoPreviewSaver(videoURL)
+        }
+    }
+    
+    func presentVideoPreviewSaver(_ url : URL) {
+        DispatchQueue.main.async {
+            let shareController = UIActivityViewController(activityItems: [url], applicationActivities: [])
+            self.present(shareController, animated: true)
+        }
+    }
     
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         requestCameraPermission()
+        setupAssetWriter()
+        setupAssetWriterInput()
     }
     
     override func viewDidLoad() {
@@ -44,45 +91,28 @@ class ViewController: UIViewController {
     }
     
     @IBAction func recordVideoTapped(_ sender: UIButton) {
+        if isRecording == false {
             
-        if metalVideoRecorder.isRecording {
-                   metalVideoRecorder.endRecording { videoURL in
-                       print("Video URL : \(videoURL)")
-                       
-                       let shareController = UIActivityViewController(activityItems: [videoURL], applicationActivities: nil)
-                       DispatchQueue.main.async {
-
-                           self.present(shareController, animated: true)
-                       }
-                   }
-               } else {
-                   metalVideoRecorder.startRecording()
-                   DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                       self.isVideoCapture.toggle()
-                       
-                   }
-
-               }
-        
-        print("isVideoCapture : \(isVideoCapture)")
-        print("metalVideoIsRecording : \(metalVideoRecorder.isRecording)")
+            assetWriter.startWriting()
+            
+            self.isRecording = true
+            self.startWritingVideo = true
+            
+        } else {
+            isRecording = false
+            startWritingVideo = false
+            finishRecording()
+        }
     }
 }
 
 extension ViewController : AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        DispatchQueue.main.async {
-            
-            guard self.metalVideoRecorder.isRecording && self.isVideoCapture else {
-                return
-            }
-            self.metalVideoRecorder.writeFrame(buffer: sampleBuffer, forSecond: Float(sampleBuffer.duration.seconds))
-            print("video frame received")
-            
+        if isRecording && startWritingVideo {
+            beginRecording(sampleBuffer)
         }
     }
 }
-
 
 
 private extension ViewController {
@@ -93,23 +123,27 @@ private extension ViewController {
             self.session.sessionPreset = .hd1280x720
             self.session.automaticallyConfiguresCaptureDeviceForWideColor = true
             self.setupInputs()
+            self.setupOutputs()
+          
+
             DispatchQueue.main.async {
                 self.setupPreviewView()
             }
-            self.setupOutputs()
+            
             self.session.commitConfiguration()
             self.session.startRunning()
-            
+        
         }
     }
     
     func setupInputs() {
         guard
             let backCamera = AVCaptureDevice
-                .default(.builtInWideAngleCamera,
-                         for: .video,
-                         position: .back) else {
-            fatalError("NO DUAL CAMERA")
+                .default(
+                    .builtInWideAngleCamera,
+                    for: .video,
+                    position: .back) else {
+            fatalError("No back camera available")
         }
         
         guard
@@ -118,27 +152,21 @@ private extension ViewController {
             fatalError("There's some error when create input for back camera")
         }
         
-        self.videoDeviceInput = videoDeviceInput
         
-        if session.canAddInput(videoDeviceInput) {
-            session.addInput(videoDeviceInput)
-            print("Input Connected")
-        }
+        guard session.canAddInput(videoDeviceInput) else {return}
         
-        
+        session.addInput(videoDeviceInput)
+        print("Input Connected")
     }
     
     func setupOutputs() {
         videoOutput = AVCaptureVideoDataOutput()
         videoOutput.setSampleBufferDelegate(self, queue: videoQueue)
         
-        if session.canAddOutput(videoOutput) {
-            session.addOutput(videoOutput)
-            print("Output Connected")
-        }
+        guard session.canAddOutput(videoOutput) else {return}
         
-        //        videoOutput.connections.first?.videoOrientation = .portrait
-        
+        session.addOutput(videoOutput)
+        print("Output Connected")
     }
     
     func setupPreviewView() {
